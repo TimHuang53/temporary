@@ -51,7 +51,7 @@ if uploaded_file is not None:
             prediction_binary = model_binary.predict(image)
             binary_class_index = int(prediction_binary[0] >= 0.5)  # 0: avocado, 1: banana
             final_class = secondary_class_names[binary_class_index]
-            confidence_binary = prediction_binary[0][0] if binary_class_index == 1 else 1 - prediction_binary[0][0]
+            confidence_binary = prediction_binary[0] if binary_class_index == 1 else 1 - prediction_binary[0]
 
             st.write("### 第二階段分類結果：")
             st.write(f"### 最終類別：{final_class}")
