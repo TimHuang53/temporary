@@ -1,0 +1,174 @@
+import os
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.models import Sequential, Model
+from tensorflow.keras.layers import Input, GlobalAveragePooling2D, Dense, Dropout, Concatenate
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, EarlyStopping
+from tensorflow.keras.applications import DenseNet121
+import seaborn as sns
+import matplotlib.pyplot as plt
+from sklearn.metrics import classification_report, confusion_matrix
+
+# 設定 Matplotlib 支援中文字體
+plt.rcParams['font.family'] = 'Microsoft JhengHei'
+
+# 資料路徑
+train_dir = r"C:\\Users\\yumit\\Downloads\\archive (4)\\MY_data\\train"
+test_dir = r"C:\\Users\\yumit\\Downloads\\archive (4)\\MY_data\\test"
+
+# 類別名稱
+class_names = ["apple", "avocado", "banana", "cherry", "kiwi", "mango", "orange", "pineapple", "strawberries", "watermelon"]
+num_classes = len(class_names)
+
+# 資料增強設置
+train_datagen = ImageDataGenerator(
+    rescale=1.0 / 255,
+    rotation_range=40,
+    width_shift_range=0.2,
+    height_shift_range=0.2,
+    shear_range=0.2,
+    zoom_range=0.2,
+    horizontal_flip=True,
+    fill_mode='nearest',
+    brightness_range=[0.8, 1.2]
+)
+
+test_datagen = ImageDataGenerator(rescale=1.0 / 255)
+
+# 訓練與測試生成器
+train_generator = train_datagen.flow_from_directory(
+    train_dir, target_size=(224, 224), batch_size=32, class_mode="categorical"
+)
+
+test_generator = test_datagen.flow_from_directory(
+    test_dir, target_size=(224, 224), batch_size=32, class_mode="categorical", shuffle=False
+)
+
+# 建立多分類模型
+base_model = DenseNet121(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
+base_model.trainable = False
+
+multi_class_model = Sequential([
+    base_model,
+    GlobalAveragePooling2D(),
+    Dense(256, activation='relu'),
+    Dropout(0.5),
+    Dense(128, activation='relu'),
+    Dropout(0.5),
+    Dense(num_classes, activation='softmax')
+])
+
+multi_class_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+
+# 訓練多分類模型
+history_multi_class = multi_class_model.fit(
+    train_generator,
+    epochs=10,
+    validation_data=test_generator,
+    callbacks=[
+        ModelCheckpoint("best_model_DenseNet121.keras", monitor="val_accuracy", save_best_only=True, mode="max", verbose=1),
+        ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, verbose=1),
+        EarlyStopping(monitor='val_loss', patience=5, verbose=1, restore_best_weights=True)
+    ]
+)
+
+# 針對酪梨與香蕉的二分類模型
+binary_train_generator = train_datagen.flow_from_directory(
+    train_dir, target_size=(224, 224), batch_size=32, class_mode="binary", classes=["avocado", "banana"]
+)
+
+binary_test_generator = test_datagen.flow_from_directory(
+    test_dir, target_size=(224, 224), batch_size=32, class_mode="binary", classes=["avocado", "banana"], shuffle=False
+)
+
+binary_base_model = DenseNet121(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
+binary_base_model.trainable = False
+
+binary_model = Sequential([
+    binary_base_model,
+    GlobalAveragePooling2D(),
+    Dense(128, activation='relu'),
+    Dropout(0.5),
+    Dense(1, activation='sigmoid')
+])
+
+binary_model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+
+# 訓練二分類模型
+history_binary = binary_model.fit(
+    binary_train_generator,
+    epochs=10,
+    validation_data=binary_test_generator,
+    callbacks=[
+        ModelCheckpoint("best_binary_model.keras", monitor="val_accuracy", save_best_only=True, mode="max", verbose=1),
+        ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, verbose=1),
+        EarlyStopping(monitor='val_loss', patience=5, verbose=1, restore_best_weights=True)
+    ]
+)
+
+# 整合模型
+multi_class_model = tf.keras.models.load_model("best_model_DenseNet121.keras")
+binary_model = tf.keras.models.load_model("best_binary_model.keras")
+
+binary_model.trainable = False
+
+input_tensor = Input(shape=(224, 224, 3))
+
+multi_class_output = multi_class_model(input_tensor)
+binary_output = binary_model(input_tensor)
+
+# 使用 Keras 的 Concatenate 替換 tf.concat
+combined_output = Concatenate(axis=-1)([
+    multi_class_output[:, :1],
+    binary_output,
+    multi_class_output[:, 2:]
+])
+
+final_model = Model(inputs=input_tensor, outputs=combined_output)
+final_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+
+# 訓練整合模型
+history_final = final_model.fit(
+    train_generator,
+    epochs=5,
+    validation_data=test_generator,
+    callbacks=[
+        ModelCheckpoint("best_combined_model.keras", monitor="val_accuracy", save_best_only=True, mode="max", verbose=1),
+        ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, verbose=1),
+        EarlyStopping(monitor='val_loss', patience=5, verbose=1, restore_best_weights=True)
+    ]
+)
+
+# 評估整合模型
+test_loss, test_accuracy = final_model.evaluate(test_generator)
+print(f"測試準確率（整合模型）：{test_accuracy * 100:.2f}%")
+
+# 預測結果與混淆矩陣
+y_pred = np.argmax(final_model.predict(test_generator), axis=1)
+y_true = test_generator.classes
+
+conf_matrix = confusion_matrix(y_true, y_pred)
+sns.heatmap(conf_matrix, annot=True, cmap="Blues", fmt="d", xticklabels=class_names, yticklabels=class_names)
+plt.title("混淆矩陣（微調後）")
+plt.xlabel("預測類別")
+plt.ylabel("實際類別")
+plt.show()
+
+# 顯示分類報告
+print(classification_report(y_true, y_pred, target_names=class_names))
+
+# 繪製訓練與驗證準確率圖
+plt.figure(figsize=(10, 6))
+plt.plot(history_multi_class.history['accuracy'], label='訓練準確率（多分類）')
+plt.plot(history_multi_class.history['val_accuracy'], label='驗證準確率（多分類）')
+plt.plot(history_binary.history['accuracy'], label='訓練準確率（二分類）')
+plt.plot(history_binary.history['val_accuracy'], label='驗證準確率（二分類）')
+plt.plot(history_final.history['accuracy'], label='訓練準確率（整合）')
+plt.plot(history_final.history['val_accuracy'], label='驗證準確率（整合）')
+plt.title('每個 Epoch 的準確率')
+plt.xlabel('Epochs')
+plt.ylabel('準確率')
+plt.legend()
+plt.grid(True)
+plt.show()

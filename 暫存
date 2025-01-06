@@ -1,0 +1,154 @@
+import os
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import GlobalAveragePooling2D, Dense, Dropout, BatchNormalization
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, EarlyStopping
+from tensorflow.keras.applications import ResNet50
+import seaborn as sns
+import matplotlib.pyplot as plt
+from sklearn.metrics import classification_report, confusion_matrix
+
+# 設定 Matplotlib 支援中文字體，避免繪圖時中文顯示錯誤
+plt.rcParams['font.family'] = 'Microsoft JhengHei'  # 可根據系統更換為其他支援中文的字體
+
+# 訓練與測試資料路徑
+train_dir = r"C:\\Users\\yumit\\Downloads\\archive (4)\\MY_data\\train"  # 訓練資料的路徑
+test_dir = r"C:\\Users\\yumit\\Downloads\\archive (4)\\MY_data\\test"  # 測試資料的路徑
+
+# 定義類別名稱（標籤）
+class_names = ["apple", "avocado", "banana", "cherry", "kiwi", "mango", "orange", "pineapple", "strawberries", "watermelon"]
+num_classes = len(class_names)  # 類別總數
+
+# 建立資料增強的設定，用於提升模型的泛化能力
+train_datagen = ImageDataGenerator(
+    rescale=1.0 / 255,  # 將像素值縮放至 [0, 1] 區間
+    rotation_range=40,  # 隨機旋轉圖片的角度範圍
+    width_shift_range=0.2,  # 水平平移的範圍
+    height_shift_range=0.2,  # 垂直平移的範圍
+    shear_range=0.2,  # 剪切變換的範圍
+    zoom_range=0.2,  # 隨機縮放的範圍
+    horizontal_flip=True,  # 水平翻轉圖片
+    fill_mode='nearest',  # 空白區域填充方式
+    brightness_range=[0.8, 1.2]  # 隨機調整亮度
+)
+
+# 測試資料不需要增強，只需進行像素值縮放
+test_datagen = ImageDataGenerator(rescale=1.0 / 255)
+
+# 建立訓練資料的生成器
+train_generator = train_datagen.flow_from_directory(
+    train_dir,
+    target_size=(224, 224),  # 圖片調整為 224x224 大小
+    batch_size=32,  # 每批次的圖片數量
+    class_mode="categorical"  # 多分類問題，使用 one-hot 編碼
+)
+
+# 建立測試資料的生成器
+test_generator = test_datagen.flow_from_directory(
+    test_dir,
+    target_size=(224, 224),  # 圖片調整為 224x224 大小
+    batch_size=32,  # 每批次的圖片數量
+    class_mode="categorical",  # 多分類問題，使用 one-hot 編碼
+    shuffle=False  # 測試資料不需要打亂
+)
+
+# 使用 ResNet50 預訓練模型作為基底
+base_model = ResNet50(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
+base_model.trainable = False  # 凍結預訓練模型的權重
+
+# 建構上層分類模型
+model = Sequential([
+    base_model,  # 加入 ResNet50 作為特徵提取器
+    GlobalAveragePooling2D(),  # 將空間特徵轉為單一向量
+    BatchNormalization(),  # 標準化輸出，提升訓練穩定性
+    Dense(256, activation='relu'),  # 第一層全連接層，256 個神經元
+    Dropout(0.5),  # Dropout 用於防止過擬合
+    BatchNormalization(),  # 再次標準化
+    Dense(128, activation='relu'),  # 第二層全連接層，128 個神經元
+    Dropout(0.5),  # Dropout 用於防止過擬合
+    BatchNormalization(),  # 再次標準化
+    Dense(64, activation='relu'),  # 第三層全連接層，64 個神經元
+    Dropout(0.5),  # Dropout 用於防止過擬合
+    Dense(num_classes, activation='softmax')  # 最後輸出層，softmax 用於多分類問題
+])
+
+# 編譯模型
+model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+
+# 解凍 ResNet50 的部分層，用於微調
+unfreeze_layers = 50  # 解凍最後 50 層
+for layer in base_model.layers[-unfreeze_layers:]:
+    layer.trainable = True
+
+# 重新編譯模型，設定更小的學習率
+model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5),
+              loss='categorical_crossentropy',
+              metrics=['accuracy'])
+
+# 訓練過程中的回調函數
+checkpoint = ModelCheckpoint(
+    "best_model.keras",  # 保存最佳模型的檔案名稱
+    monitor="val_accuracy",  # 監控驗證準確率
+    save_best_only=True,  # 只保存最佳權重
+    mode="max",  # 尋找最大化的準確率
+    verbose=1  # 顯示儲存資訊
+)
+
+lr_scheduler = ReduceLROnPlateau(
+    monitor='val_loss',  # 監控驗證損失
+    factor=0.5,  # 學習率縮小的因子
+    patience=3,  # 若驗證損失在 3 個 Epoch 中未下降，則減少學習率
+    verbose=1  # 顯示學習率調整資訊
+)
+
+early_stopping = EarlyStopping(
+    monitor='val_loss',  # 監控驗證損失
+    patience=5,  # 若驗證損失在 5 個 Epoch 中未下降，則停止訓練
+    verbose=1,  # 顯示停止資訊
+    restore_best_weights=True  # 恢復至最佳權重
+)
+
+# 開始訓練模型
+try:
+    history = model.fit(train_generator, epochs=20, validation_data=test_generator,
+                        callbacks=[checkpoint, lr_scheduler, early_stopping])
+except Exception as e:
+    print(f"模型訓練過程中出現錯誤：{e}")
+
+# 評估模型
+try:
+    test_loss, test_accuracy = model.evaluate(test_generator)
+    print(f"測試準確率：{test_accuracy * 100:.2f}%")
+
+    # 預測結果
+    y_pred = np.argmax(model.predict(test_generator), axis=1)  # 模型預測的類別
+    y_true = test_generator.classes  # 真實類別
+
+    # 繪製混淆矩陣
+    conf_matrix = confusion_matrix(y_true, y_pred)
+    sns.heatmap(conf_matrix, annot=True, cmap="Blues", fmt="d", xticklabels=class_names, yticklabels=class_names)
+    plt.title("混淆矩陣")
+    plt.xlabel("預測類別")
+    plt.ylabel("實際類別")
+    plt.show()
+
+    # 顯示分類報告
+    print(classification_report(y_true, y_pred, target_names=class_names))
+except Exception as e:
+    print(f"模型評估過程中出現錯誤：{e}")
+
+# 繪製訓練與驗證準確率圖
+try:
+    plt.figure(figsize=(10, 6))
+    plt.plot(history.history['accuracy'], label='訓練準確率')
+    plt.plot(history.history['val_accuracy'], label='驗證準確率')
+    plt.title('每個 Epoch 的準確率')
+    plt.xlabel('Epochs')
+    plt.ylabel('準確率')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+except Exception as e:
+    print(f"繪製準確率圖表過程中出現錯誤：{e}")
